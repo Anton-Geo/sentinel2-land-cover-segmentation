@@ -318,15 +318,7 @@ def main() -> None:
         ignore_index=args.ignore_index,
     )
 
-    class_names = [
-        "class_0",
-        "class_1",
-        "class_2",
-        "class_3",
-        "class_4",
-        "class_5",
-        "class_6",
-    ]
+    class_names = LANDCOVERNET_CLASSES
 
     metrics_text = format_metrics(
         metrics=test_metrics,
