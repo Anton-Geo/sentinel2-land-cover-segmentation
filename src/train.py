@@ -285,6 +285,19 @@ def parse_args() -> argparse.Namespace:
         help="Use class-frequency-based alpha weights for FocalLoss.",
     )
 
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help="Stop training if val mIoU does not improve for N epochs.",
+    )
+
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.001,
+    )
+
     return parser.parse_args()
 
 
@@ -412,6 +425,7 @@ def main() -> None:
     )
 
     best_val_miou = -1.0
+    epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
         current_lr = optimizer.param_groups[0]["lr"]
@@ -488,8 +502,11 @@ def main() -> None:
             args=args,
         )
 
-        if val_miou > best_val_miou:
+        improved = val_miou > best_val_miou + args.early_stopping_min_delta
+
+        if improved:
             best_val_miou = val_miou
+            epochs_without_improvement = 0
 
             save_checkpoint(
                 output_path=best_checkpoint_path,
@@ -501,6 +518,18 @@ def main() -> None:
             )
 
             print(f"Saved new best model with val mIoU={best_val_miou:.4f}")
+        else:
+            epochs_without_improvement += 1
+
+        if args.early_stopping_patience is not None:
+            print(
+                f"Early stopping counter: "
+                f"{epochs_without_improvement}/{args.early_stopping_patience}"
+            )
+
+            if epochs_without_improvement >= args.early_stopping_patience:
+                print("Early stopping triggered.")
+                break
 
     print("")
     print("=" * 80)
