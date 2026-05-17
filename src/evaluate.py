@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-import json
 
 import torch
 import torch.nn as nn
@@ -361,11 +360,6 @@ def main() -> None:
         output_path=confusion_csv_path,
         class_names=class_names,
     )
-
-    config_path = output_dir / "config.json"
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(vars(args), f, indent=2)
 
     print("")
     print(f"Saved metrics:          {metrics_txt_path}")
