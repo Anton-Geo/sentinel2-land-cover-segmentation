@@ -1,0 +1,5 @@
+numpy
+pandas
+rasterio
+matplotlib
+tqdm
