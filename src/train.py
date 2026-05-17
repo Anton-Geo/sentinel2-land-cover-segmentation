@@ -4,6 +4,7 @@ import argparse
 import csv
 import random
 from pathlib import Path
+import json
 
 import numpy as np
 import torch
@@ -530,6 +531,11 @@ def main() -> None:
             if epochs_without_improvement >= args.early_stopping_patience:
                 print("Early stopping triggered.")
                 break
+
+    config_path = output_dir / "config.json"
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2)
 
     print("")
     print("=" * 80)
