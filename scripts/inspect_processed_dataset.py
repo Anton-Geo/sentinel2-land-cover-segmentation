@@ -22,6 +22,21 @@ def percentile_stretch(image: np.ndarray, lower: float = 2, upper: float = 98) -
     return out
 
 
+def get_band_index(descriptions: tuple[str | None, ...], band_name: str, fallback: int | None = None) -> int:
+    """Return zero-based band index from GeoTIFF band descriptions."""
+    normalized = [desc.strip() if desc is not None else None for desc in descriptions]
+
+    if band_name in normalized:
+        return normalized.index(band_name)
+
+    if fallback is not None:
+        return fallback
+
+    raise ValueError(
+        f"Band {band_name} not found in descriptions: {descriptions}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, required=True)
@@ -47,12 +62,13 @@ def main() -> None:
 
     with rasterio.open(image_path) as src:
         image = src.read().astype(np.float32)
+        descriptions = src.descriptions
         print(f"Image path: {image_path}")
         print(f"Image shape: {image.shape}")
         print(f"Image dtype: {image.dtype}")
         print(f"Image CRS: {src.crs}")
         print(f"Image transform: {src.transform}")
-        print(f"Band descriptions: {src.descriptions}")
+        print(f"Band descriptions: {descriptions}")
 
     with rasterio.open(mask_path) as src:
         mask = src.read(1)
@@ -61,9 +77,13 @@ def main() -> None:
         print(f"Mask dtype: {mask.dtype}")
         print(f"Mask unique values: {np.unique(mask)}")
 
-    # image bands: B02, B03, B04, B08
-    # RGB visualization: B04, B03, B02
-    rgb = np.stack([image[2], image[1], image[0]], axis=-1)
+    # RGB visualization: B04, B03, B02. Use band descriptions so this works
+    # for both the old 10-band order and the new TorchGeo 13-band order.
+    red_idx = get_band_index(descriptions, "B04", fallback=2)
+    green_idx = get_band_index(descriptions, "B03", fallback=1)
+    blue_idx = get_band_index(descriptions, "B02", fallback=0)
+
+    rgb = np.stack([image[red_idx], image[green_idx], image[blue_idx]], axis=-1)
     rgb_vis = percentile_stretch(rgb)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))

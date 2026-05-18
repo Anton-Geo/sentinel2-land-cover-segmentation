@@ -15,7 +15,7 @@ from src.dataset import create_train_val_test_datasets, LANDCOVERNET_CLASSES
 from src.losses import ComboLoss
 from src.metrics import SegmentationMetricTracker, format_metrics
 from src.model import count_trainable_parameters
-from src.model_factory import create_model
+from src.model_factory import SUPPORTED_MODELS, create_model
 
 
 def set_seed(seed: int) -> None:
@@ -179,7 +179,7 @@ def append_history_row(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train Residual U-Net on processed LandCoverNet dataset."
+        description="Train segmentation models on processed LandCoverNet dataset."
     )
 
     parser.add_argument(
@@ -194,6 +194,51 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="outputs/residual_unet",
         help="Directory for checkpoints and logs.",
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="resunet",
+        choices=SUPPORTED_MODELS,
+        help="Segmentation model architecture.",
+    )
+
+    parser.add_argument(
+        "--encoder-name",
+        type=str,
+        default="resnet34",
+        help=(
+            "Encoder name for segmentation_models_pytorch models, "
+            "for example resnet34, resnet50, efficientnet-b3."
+        ),
+    )
+
+    parser.add_argument(
+        "--encoder-weights",
+        type=str,
+        default="imagenet",
+        help=(
+            "Encoder weights for segmentation_models_pytorch models. "
+            "Use 'imagenet' for pretrained weights or 'none' for random init."
+        ),
+    )
+
+    parser.add_argument(
+        "--torchgeo-weights",
+        type=str,
+        default="sentinel2_all_dino",
+        help=(
+            "TorchGeo ResNet50 pretrained weights. Examples: "
+            "sentinel2_all_dino, sentinel2_all_moco, sentinel2_all_seco_eco, none."
+        ),
+    )
+
+    parser.add_argument(
+        "--torchgeo-decoder-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout used in the TorchGeo ResNet50 U-Net decoder.",
     )
 
     parser.add_argument(
@@ -307,31 +352,6 @@ def parse_args() -> argparse.Namespace:
         default=0.001,
     )
 
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="resunet",
-        choices=["resunet", "deeplabv3plus", "unetplusplus", "fpn"],
-        help="Segmentation model architecture.",
-    )
-
-    parser.add_argument(
-        "--encoder-name",
-        type=str,
-        default="resnet34",
-        help="Encoder name for pretrained SMP models, e.g. resnet34, resnet50, efficientnet-b3.",
-    )
-
-    parser.add_argument(
-        "--encoder-weights",
-        type=str,
-        default="imagenet",
-        help=(
-            "Encoder pretrained weights for SMP models. "
-            "Use 'imagenet' for pretrained weights or 'none' to train from scratch."
-        ),
-    )
-
     return parser.parse_args()
 
 
@@ -422,7 +442,7 @@ def main() -> None:
 
     encoder_weights = args.encoder_weights
 
-    if encoder_weights.lower() in {"none", "null"}:
+    if encoder_weights.lower() in {"none", "null", ""}:
         encoder_weights = None
 
     model = create_model(
@@ -432,6 +452,8 @@ def main() -> None:
         base_features=args.base_features,
         encoder_name=args.encoder_name,
         encoder_weights=encoder_weights,
+        torchgeo_weights=args.torchgeo_weights,
+        torchgeo_decoder_dropout=args.torchgeo_decoder_dropout,
     )
 
     model = model.to(device)
@@ -443,9 +465,13 @@ def main() -> None:
         features_tuple = (f1, f1 * 2, f1 * 4, f1 * 8)
         print(f"Features: {features_tuple}")
 
-    if args.model == "deeplabv3plus":
+    if args.model in {"deeplabv3plus", "unetplusplus", "fpn"}:
         print(f"Encoder: {args.encoder_name}")
         print(f"Encoder weights: {encoder_weights}")
+
+    if args.model == "torchgeo_resnet50_unet":
+        print(f"TorchGeo weights: {args.torchgeo_weights}")
+        print(f"TorchGeo decoder dropout: {args.torchgeo_decoder_dropout}")
 
     print(f"Trainable parameters: {count_trainable_parameters(model):,}")
 

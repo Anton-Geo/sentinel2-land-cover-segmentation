@@ -23,6 +23,31 @@ DEFAULT_BANDS = [
     "B12",  # SWIR 2
 ]
 
+# TorchGeo Sentinel-2 ALL ResNet50 weights expect 13 input channels.
+# LandCoverNet v1.0 raw data does not include B10, because it is a cirrus band
+# and is not useful for land surface analysis. For TorchGeo compatibility, the
+# torchgeo13 preset inserts B10 as a zero-filled channel in the correct position.
+TORCHGEO13_BANDS = [
+    "B01",
+    "B02",
+    "B03",
+    "B04",
+    "B05",
+    "B06",
+    "B07",
+    "B08",
+    "B8A",
+    "B09",
+    "B10",  # zero-filled synthetic band
+    "B11",
+    "B12",
+]
+
+BAND_PRESETS = {
+    "10bands": DEFAULT_BANDS,
+    "torchgeo13": TORCHGEO13_BANDS,
+}
+
 DEFAULT_MONTHS = [6, 7, 8]
 
 # Sentinel-2 Scene Classification Layer classes to remove:
@@ -61,10 +86,25 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--band-preset",
+        type=str,
+        default="10bands",
+        choices=sorted(BAND_PRESETS.keys()),
+        help=(
+            "Band preset to use when --bands is not provided. "
+            "'10bands' reproduces the previous 10-channel dataset. "
+            "'torchgeo13' creates Sentinel-2 13-channel order with zero-filled B10."
+        ),
+    )
+
+    parser.add_argument(
         "--bands",
         nargs="+",
-        default=DEFAULT_BANDS,
-        help="Sentinel-2 bands to include.",
+        default=None,
+        help=(
+            "Custom Sentinel-2 bands to include. Overrides --band-preset. "
+            "Use B10 only if you want a zero-filled synthetic B10 channel."
+        ),
     )
 
     parser.add_argument(
@@ -375,6 +415,13 @@ def read_scene_stack(
     scene_bands: list[np.ndarray] = []
 
     for band in bands:
+        if band == "B10":
+            # LandCoverNet raw data does not contain B10. Keep the channel in the
+            # correct Sentinel-2 position for TorchGeo pretrained weights by
+            # inserting a zero-filled synthetic band.
+            scene_bands.append(np.zeros_like(scl, dtype=np.float32))
+            continue
+
         band_path = find_band_file(
             scene_dir=scene_dir,
             chip_id=chip_id,
@@ -568,11 +615,18 @@ def main() -> None:
 
     metadata_path = output_dir / "metadata.csv"
 
-    bands = list(args.bands)
+    if args.bands is not None:
+        bands = list(args.bands)
+        band_preset = "custom"
+    else:
+        bands = list(BAND_PRESETS[args.band_preset])
+        band_preset = args.band_preset
+
     months = set(args.months)
 
     print(f"Raw dir: {raw_dir}")
     print(f"Output dir: {output_dir}")
+    print(f"Band preset: {band_preset}")
     print(f"Bands: {bands}")
     print(f"Months: {sorted(months)}")
 
@@ -613,6 +667,7 @@ def main() -> None:
                     "mask_path": str(output_mask_path),
                     "num_summer_scenes_total": -1,
                     "num_summer_scenes_used": -1,
+                    "band_preset": band_preset,
                     "bands": ",".join(bands),
                     "status": "already_exists",
                 }
@@ -680,6 +735,7 @@ def main() -> None:
                 "mask_path": str(output_mask_path),
                 "num_summer_scenes_total": len(scene_dirs),
                 "num_summer_scenes_used": used_scene_count,
+                "band_preset": band_preset,
                 "bands": ",".join(bands),
                 "status": "processed",
             }
@@ -694,6 +750,7 @@ def main() -> None:
             "mask_path",
             "num_summer_scenes_total",
             "num_summer_scenes_used",
+            "band_preset",
             "bands",
             "status",
         ]

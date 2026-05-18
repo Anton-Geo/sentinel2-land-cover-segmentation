@@ -12,7 +12,7 @@ from src.dataset import create_train_val_test_datasets, LANDCOVERNET_CLASSES
 from src.losses import ComboLoss
 from src.metrics import SegmentationMetricTracker, format_metrics
 from src.model import count_trainable_parameters
-from src.model_factory import create_model
+from src.model_factory import SUPPORTED_MODELS, create_model
 
 
 def get_device() -> torch.device:
@@ -110,7 +110,7 @@ def save_test_summary(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate Residual U-Net on processed LandCoverNet test set."
+        description="Evaluate segmentation model on processed LandCoverNet test set."
     )
 
     parser.add_argument(
@@ -132,6 +132,45 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="outputs/evaluation",
         help="Directory for evaluation results.",
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="resunet",
+        choices=SUPPORTED_MODELS,
+        help="Segmentation model architecture. Must match the training run.",
+    )
+
+    parser.add_argument(
+        "--encoder-name",
+        type=str,
+        default="resnet34",
+        help="Encoder name for segmentation_models_pytorch models.",
+    )
+
+    parser.add_argument(
+        "--encoder-weights",
+        type=str,
+        default="imagenet",
+        help="Encoder weights for SMP models. Use 'imagenet' or 'none'.",
+    )
+
+    parser.add_argument(
+        "--torchgeo-weights",
+        type=str,
+        default="sentinel2_all_dino",
+        help=(
+            "TorchGeo ResNet50 pretrained weights. Examples: "
+            "sentinel2_all_dino, sentinel2_all_moco, sentinel2_all_seco_eco, none."
+        ),
+    )
+
+    parser.add_argument(
+        "--torchgeo-decoder-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout used in the TorchGeo ResNet50 U-Net decoder.",
     )
 
     parser.add_argument(
@@ -200,28 +239,6 @@ def parse_args() -> argparse.Namespace:
         "--use-class-alpha",
         action="store_true",
         help="Use the same class-frequency alpha weights as in train.py.",
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="resunet",
-        choices=["resunet", "deeplabv3plus", "unetplusplus", "fpn"],
-        help="Segmentation model architecture.",
-    )
-
-    parser.add_argument(
-        "--encoder-name",
-        type=str,
-        default="resnet34",
-        help="Encoder name for pretrained SMP models.",
-    )
-
-    parser.add_argument(
-        "--encoder-weights",
-        type=str,
-        default="imagenet",
-        help="Encoder pretrained weights for SMP models. Use 'imagenet' or 'none'.",
     )
 
     return parser.parse_args()
@@ -304,7 +321,7 @@ def main() -> None:
 
     encoder_weights = args.encoder_weights
 
-    if encoder_weights.lower() in {"none", "null"}:
+    if encoder_weights.lower() in {"none", "null", ""}:
         encoder_weights = None
 
     model = create_model(
@@ -314,6 +331,8 @@ def main() -> None:
         base_features=args.base_features,
         encoder_name=args.encoder_name,
         encoder_weights=encoder_weights,
+        torchgeo_weights=args.torchgeo_weights,
+        torchgeo_decoder_dropout=args.torchgeo_decoder_dropout,
     )
 
     checkpoint = torch.load(
@@ -326,9 +345,13 @@ def main() -> None:
 
     print(f"Model: {args.model}")
 
-    if args.model == "deeplabv3plus":
+    if args.model in {"deeplabv3plus", "unetplusplus", "fpn"}:
         print(f"Encoder: {args.encoder_name}")
         print(f"Encoder weights: {encoder_weights}")
+
+    if args.model == "torchgeo_resnet50_unet":
+        print(f"TorchGeo weights: {args.torchgeo_weights}")
+        print(f"TorchGeo decoder dropout: {args.torchgeo_decoder_dropout}")
 
     print(f"Trainable parameters: {count_trainable_parameters(model):,}")
 
