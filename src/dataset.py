@@ -46,8 +46,8 @@ class LandCoverNetDataset(Dataset):
         └── ...
 
     Image:
-        GeoTIFF with shape [4, H, W]
-        bands: B02, B03, B04, B08
+        GeoTIFF with shape [C, H, W]
+        C can be 4 for the original dataset or 10 for the multiband dataset
 
     Mask:
         GeoTIFF with shape [H, W]
@@ -69,6 +69,7 @@ class LandCoverNetDataset(Dataset):
         augment: bool = False,
         random_crop_size: int | None = None,
         ignore_index: int = 255,
+        expected_channels: int | None = None,
     ) -> None:
         self.root_dir = Path(root_dir)
         self.images_dir = self.root_dir / "images"
@@ -80,6 +81,7 @@ class LandCoverNetDataset(Dataset):
         self.augment = augment
         self.random_crop_size = random_crop_size
         self.ignore_index = ignore_index
+        self.expected_channels = expected_channels
 
         self.image_paths = sorted(self.images_dir.glob("*.tif"))
 
@@ -127,9 +129,10 @@ class LandCoverNetDataset(Dataset):
         if image.ndim != 3:
             raise ValueError(f"Expected image shape [C, H, W], got {image.shape}")
 
-        if image.shape[0] != 4:
+        if self.expected_channels is not None and image.shape[0] != self.expected_channels:
             raise ValueError(
-                f"Expected 4-channel Sentinel-2 image, got shape {image.shape}"
+                f"Expected {self.expected_channels}-channel Sentinel-2 image, "
+                f"got shape {image.shape}"
             )
 
         return image
@@ -268,6 +271,7 @@ def create_train_val_test_datasets(
     augment_train: bool = True,
     random_crop_size: int | None = None,
     ignore_index: int = 255,
+    expected_channels: int | None = None,
 ) -> tuple[Dataset, Dataset, Dataset]:
     """
     Create train / validation / test splits.
@@ -288,6 +292,7 @@ def create_train_val_test_datasets(
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
+        expected_channels=expected_channels,
     )
 
     dataset_size = len(base_dataset)
@@ -311,6 +316,7 @@ def create_train_val_test_datasets(
         augment=augment_train,
         random_crop_size=random_crop_size,
         ignore_index=ignore_index,
+        expected_channels=expected_channels,
     )
 
     val_dataset = LandCoverNetDataset(
@@ -319,6 +325,7 @@ def create_train_val_test_datasets(
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
+        expected_channels=expected_channels,
     )
 
     test_dataset = LandCoverNetDataset(
@@ -327,6 +334,7 @@ def create_train_val_test_datasets(
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
+        expected_channels=expected_channels,
     )
 
     # Reuse the same indices from random_split

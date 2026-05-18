@@ -362,6 +362,7 @@ def main() -> None:
         augment_train=not args.no_augment,
         random_crop_size=args.random_crop_size,
         ignore_index=args.ignore_index,
+        expected_channels=args.in_channels,
     )
 
     print(f"Train samples: {len(train_dataset)}")
