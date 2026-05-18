@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader
 from src.dataset import create_train_val_test_datasets, LANDCOVERNET_CLASSES
 from src.losses import ComboLoss
 from src.metrics import SegmentationMetricTracker, format_metrics
-from src.model import ResidualUNet, count_trainable_parameters
+from src.model import count_trainable_parameters
+from src.model_factory import create_model
 
 
 def set_seed(seed: int) -> None:
@@ -306,6 +307,31 @@ def parse_args() -> argparse.Namespace:
         default=0.001,
     )
 
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="resunet",
+        choices=["resunet", "deeplabv3plus"],
+        help="Segmentation model architecture.",
+    )
+
+    parser.add_argument(
+        "--encoder-name",
+        type=str,
+        default="resnet34",
+        help="Encoder name for pretrained SMP models, e.g. resnet34, resnet50, efficientnet-b3.",
+    )
+
+    parser.add_argument(
+        "--encoder-weights",
+        type=str,
+        default="imagenet",
+        help=(
+            "Encoder pretrained weights for SMP models. "
+            "Use 'imagenet' for pretrained weights or 'none' to train from scratch."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -394,26 +420,33 @@ def main() -> None:
         drop_last=False,
     )
 
-    f1 = args.base_features
-    features_tuple = (f1, f1 * 2, f1 * 4, f1 * 8)
+    encoder_weights = args.encoder_weights
 
-    dropout_encoder_ = (0.0, 0.05, 0.1, 0.2)
-    dropout_bottleneck_ = 0.3
-    dropout_decoder_ = (0.2, 0.1, 0.05, 0.0)
+    if encoder_weights.lower() in {"none", "null"}:
+        encoder_weights = None
 
-    model = ResidualUNet(
+    model = create_model(
+        model_name=args.model,
         in_channels=args.in_channels,
         num_classes=args.num_classes,
-        features=features_tuple,
-        dropout_encoder = dropout_encoder_,
-        dropout_bottleneck = dropout_bottleneck_,
-        dropout_decoder = dropout_decoder_,
+        base_features=args.base_features,
+        encoder_name=args.encoder_name,
+        encoder_weights=encoder_weights,
     )
 
     model = model.to(device)
 
-    print(f"Model: ResidualUNet")
-    print(f"Features: {features_tuple}")
+    print(f"Model: {args.model}")
+
+    if args.model == "resunet":
+        f1 = args.base_features
+        features_tuple = (f1, f1 * 2, f1 * 4, f1 * 8)
+        print(f"Features: {features_tuple}")
+
+    if args.model == "deeplabv3plus":
+        print(f"Encoder: {args.encoder_name}")
+        print(f"Encoder weights: {encoder_weights}")
+
     print(f"Trainable parameters: {count_trainable_parameters(model):,}")
 
     if args.use_class_alpha:
