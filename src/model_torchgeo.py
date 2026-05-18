@@ -201,6 +201,9 @@ class TorchGeoResNet50UNet(nn.Module):
         x0 = self.encoder.conv1(x)
         x0 = self.encoder.bn1(x0)
 
+        # TorchGeo 0.9 uses timm-style ResNet models where the first
+        # activation is usually called act1, while torchvision-style
+        # ResNets use relu. Support both to keep the wrapper robust.
         if hasattr(self.encoder, "act1"):
             x0 = self.encoder.act1(x0)
         elif hasattr(self.encoder, "relu"):

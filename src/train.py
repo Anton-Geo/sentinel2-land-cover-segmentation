@@ -42,8 +42,14 @@ def train_one_epoch(
     device: torch.device,
     num_classes: int,
     ignore_index: int,
+    keep_encoder_frozen: bool = False,
 ) -> tuple[float, float, float, float]:
     model.train()
+
+    # If the encoder is frozen, keep its BatchNorm layers in eval mode as well.
+    # This avoids updating pretrained running statistics during decoder warm-up.
+    if keep_encoder_frozen and hasattr(model, "encoder"):
+        model.encoder.eval()
 
     total_loss = 0.0
     total_batches = 0
@@ -150,7 +156,7 @@ def save_checkpoint(
 
 def append_history_row(
     history_path: Path,
-    row: dict[str, float | int],
+    row: dict[str, float | int | str],
 ) -> None:
     file_exists = history_path.exists()
 
@@ -168,6 +174,9 @@ def append_history_row(
                 "val_miou",
                 "val_mdice",
                 "lr",
+                "encoder_lr",
+                "decoder_lr",
+                "encoder_frozen",
             ],
         )
 
@@ -257,6 +266,27 @@ def parse_args() -> argparse.Namespace:
         "--learning-rate",
         type=float,
         default=1e-3,
+        help="Main learning rate. For TorchGeo models this is used for decoder/head parameters.",
+    )
+
+    parser.add_argument(
+        "--encoder-learning-rate",
+        type=float,
+        default=None,
+        help=(
+            "Optional encoder learning rate for TorchGeo pretrained models. "
+            "If omitted, the encoder uses --learning-rate. Recommended: 1e-4."
+        ),
+    )
+
+    parser.add_argument(
+        "--freeze-encoder-epochs",
+        type=int,
+        default=0,
+        help=(
+            "For TorchGeo pretrained models, freeze encoder parameters for the first N epochs. "
+            "Use 0 to disable."
+        ),
     )
 
     parser.add_argument(
@@ -287,6 +317,17 @@ def parse_args() -> argparse.Namespace:
         "--in-channels",
         type=int,
         default=4,
+    )
+
+    parser.add_argument(
+        "--normalization-mode",
+        type=str,
+        default="reflectance",
+        choices=["none", "reflectance", "torchgeo_s2"],
+        help=(
+            "Input normalization. 'reflectance' divides by 10000 and clips to [0, 1.5]. "
+            "'torchgeo_s2' applies 13-band Sentinel-2 mean/std normalization for TorchGeo weights."
+        ),
     )
 
     parser.add_argument(
@@ -385,6 +426,72 @@ def build_class_alpha(device: torch.device) -> torch.Tensor:
     return alpha
 
 
+
+def set_encoder_trainable(model: nn.Module, trainable: bool) -> None:
+    if not hasattr(model, "encoder"):
+        return
+
+    for parameter in model.encoder.parameters():
+        parameter.requires_grad = trainable
+
+
+def get_optimizer_lrs(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    result: dict[str, float] = {}
+
+    for idx, group in enumerate(optimizer.param_groups):
+        name = str(group.get("name", f"group_{idx}"))
+        result[name] = float(group["lr"])
+
+    return result
+
+
+def create_optimizer(
+    model: nn.Module,
+    model_name: str,
+    learning_rate: float,
+    encoder_learning_rate: float | None,
+    weight_decay: float,
+) -> torch.optim.Optimizer:
+    if model_name == "torchgeo_resnet50_unet" and hasattr(model, "encoder"):
+        encoder_lr = learning_rate if encoder_learning_rate is None else encoder_learning_rate
+
+        encoder_params = []
+        decoder_params = []
+
+        for name, parameter in model.named_parameters():
+            if name.startswith("encoder."):
+                encoder_params.append(parameter)
+            else:
+                decoder_params.append(parameter)
+
+        return torch.optim.AdamW(
+            [
+                {
+                    "params": encoder_params,
+                    "lr": encoder_lr,
+                    "weight_decay": weight_decay,
+                    "name": "encoder",
+                },
+                {
+                    "params": decoder_params,
+                    "lr": learning_rate,
+                    "weight_decay": weight_decay,
+                    "name": "decoder",
+                },
+            ]
+        )
+
+    return torch.optim.AdamW(
+        [
+            {
+                "params": model.parameters(),
+                "lr": learning_rate,
+                "weight_decay": weight_decay,
+                "name": "all",
+            }
+        ]
+    )
+
 def main() -> None:
     args = parse_args()
 
@@ -411,7 +518,8 @@ def main() -> None:
         val_ratio=0.15,
         test_ratio=0.15,
         seed=args.seed,
-        normalize=True,
+        normalize=args.normalization_mode != "none",
+        normalization_mode=args.normalization_mode,
         augment_train=not args.no_augment,
         random_crop_size=args.random_crop_size,
         ignore_index=args.ignore_index,
@@ -459,6 +567,7 @@ def main() -> None:
     model = model.to(device)
 
     print(f"Model: {args.model}")
+    print(f"Normalization mode: {args.normalization_mode}")
 
     if args.model == "resunet":
         f1 = args.base_features
@@ -472,6 +581,8 @@ def main() -> None:
     if args.model == "torchgeo_resnet50_unet":
         print(f"TorchGeo weights: {args.torchgeo_weights}")
         print(f"TorchGeo decoder dropout: {args.torchgeo_decoder_dropout}")
+        print(f"Encoder learning rate: {args.encoder_learning_rate}")
+        print(f"Freeze encoder epochs: {args.freeze_encoder_epochs}")
 
     print(f"Trainable parameters: {count_trainable_parameters(model):,}")
 
@@ -490,9 +601,11 @@ def main() -> None:
         ignore_index=args.ignore_index,
     )
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
+    optimizer = create_optimizer(
+        model=model,
+        model_name=args.model,
+        learning_rate=args.learning_rate,
+        encoder_learning_rate=args.encoder_learning_rate,
         weight_decay=args.weight_decay,
     )
 
@@ -506,13 +619,41 @@ def main() -> None:
     best_val_miou = -1.0
     epochs_without_improvement = 0
 
+    encoder_was_frozen: bool | None = None
+
     for epoch in range(1, args.epochs + 1):
-        current_lr = optimizer.param_groups[0]["lr"]
+        encoder_frozen = (
+            args.model == "torchgeo_resnet50_unet"
+            and args.freeze_encoder_epochs > 0
+            and epoch <= args.freeze_encoder_epochs
+        )
+
+        if args.model == "torchgeo_resnet50_unet" and encoder_frozen != encoder_was_frozen:
+            set_encoder_trainable(model, trainable=not encoder_frozen)
+            encoder_was_frozen = encoder_frozen
+
+            if encoder_frozen:
+                print(f"Freezing TorchGeo encoder for epoch {epoch}.")
+            else:
+                print(f"Unfreezing TorchGeo encoder at epoch {epoch}.")
+
+        lrs = get_optimizer_lrs(optimizer)
+        current_lr = max(lrs.values())
+        encoder_lr = lrs.get("encoder", current_lr)
+        decoder_lr = lrs.get("decoder", current_lr)
 
         print("")
         print("=" * 80)
         print(f"Epoch {epoch}/{args.epochs}")
-        print(f"Learning rate: {current_lr:.6g}")
+
+        if args.model == "torchgeo_resnet50_unet":
+            print(
+                f"Learning rate: encoder={encoder_lr:.6g}, "
+                f"decoder={decoder_lr:.6g}"
+            )
+            print(f"Encoder frozen: {encoder_frozen}")
+        else:
+            print(f"Learning rate: {current_lr:.6g}")
 
         train_loss, train_acc, train_miou, train_mdice = train_one_epoch(
             model=model,
@@ -522,6 +663,7 @@ def main() -> None:
             device=device,
             num_classes=args.num_classes,
             ignore_index=args.ignore_index,
+            keep_encoder_frozen=encoder_frozen,
         )
 
         val_loss, val_acc, val_miou, val_mdice, val_metrics_text = validate_one_epoch(
@@ -569,6 +711,9 @@ def main() -> None:
                 "val_miou": val_miou,
                 "val_mdice": val_mdice,
                 "lr": current_lr,
+                "encoder_lr": encoder_lr,
+                "decoder_lr": decoder_lr,
+                "encoder_frozen": int(encoder_frozen),
             },
         )
 

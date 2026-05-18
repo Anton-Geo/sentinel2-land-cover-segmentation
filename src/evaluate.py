@@ -205,6 +205,17 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--normalization-mode",
+        type=str,
+        default="reflectance",
+        choices=["none", "reflectance", "torchgeo_s2"],
+        help=(
+            "Input normalization. Must match the training run. "
+            "Use 'torchgeo_s2' for TorchGeo Sentinel-2 stats normalization."
+        ),
+    )
+
+    parser.add_argument(
         "--base-features",
         type=int,
         default=32,
@@ -299,7 +310,8 @@ def main() -> None:
         val_ratio=0.15,
         test_ratio=0.15,
         seed=args.seed,
-        normalize=True,
+        normalize=args.normalization_mode != "none",
+        normalization_mode=args.normalization_mode,
         augment_train=False,
         random_crop_size=None,
         ignore_index=args.ignore_index,
@@ -344,6 +356,7 @@ def main() -> None:
     model = model.to(device)
 
     print(f"Model: {args.model}")
+    print(f"Normalization mode: {args.normalization_mode}")
 
     if args.model in {"deeplabv3plus", "unetplusplus", "fpn"}:
         print(f"Encoder: {args.encoder_name}")
