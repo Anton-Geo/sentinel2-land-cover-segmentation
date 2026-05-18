@@ -200,7 +200,13 @@ class TorchGeoResNet50UNet(nn.Module):
 
         x0 = self.encoder.conv1(x)
         x0 = self.encoder.bn1(x0)
-        x0 = self.encoder.relu(x0)
+
+        if hasattr(self.encoder, "act1"):
+            x0 = self.encoder.act1(x0)
+        elif hasattr(self.encoder, "relu"):
+            x0 = self.encoder.relu(x0)
+        else:
+            x0 = F.relu(x0, inplace=True)
 
         x = self.encoder.maxpool(x0)
 
