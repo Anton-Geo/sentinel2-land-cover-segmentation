@@ -165,6 +165,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--base-features",
+        type=int,
+        default=32,
+        help="Base number of features for the first U-Net layer. Default: 32.",
+    )
+
+    parser.add_argument(
         "--ignore-index",
         type=int,
         default=255,
@@ -272,10 +279,20 @@ def main() -> None:
         drop_last=False,
     )
 
+    f1 = args.base_features
+    features_tuple = (f1, f1 * 2, f1 * 4, f1 * 8)
+
+    dropout_encoder_ = (0.0, 0.05, 0.1, 0.2)
+    dropout_bottleneck_ = 0.3
+    dropout_decoder_ = (0.2, 0.1, 0.05, 0.0)
+
     model = ResidualUNet(
         in_channels=args.in_channels,
         num_classes=args.num_classes,
-        features=(32, 64, 128, 256),
+        features=features_tuple,
+        dropout_encoder = dropout_encoder_,
+        dropout_bottleneck = dropout_bottleneck_,
+        dropout_decoder = dropout_decoder_,
     )
 
     checkpoint = torch.load(
