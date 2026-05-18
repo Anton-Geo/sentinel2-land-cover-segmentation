@@ -30,6 +30,29 @@ ORIGINAL_TO_TRAIN_LABEL = {
     7: 6,    # Natural Grassland
 }
 
+NORMALIZATION_MODES = ["none", "reflectance", "torchgeo_s2"]
+
+# Sentinel-2 13-band order used by TorchGeo SENTINEL2_ALL_* ResNet50 weights:
+# B01, B02, B03, B04, B05, B06, B07, B08, B8A, B09, B10, B11, B12.
+# Values are in raw reflectance-like digital numbers, not divided by 10000.
+TORCHGEO_S2_MEAN = np.array(
+    [
+        1612.9052, 1397.6073, 1322.2919, 1373.3869, 1561.2764,
+        2108.4822, 2390.7429, 2318.7560, 2581.6467, 837.2778,
+        22.2936, 2195.5127, 1537.6821,
+    ],
+    dtype=np.float32,
+)
+
+TORCHGEO_S2_STD = np.array(
+    [
+        791.9904, 854.8830, 878.2342, 1144.6632, 1127.9778,
+        1164.8842, 1276.8750, 1249.5778, 1345.5264, 577.3161,
+        47.9234, 1340.4779, 1142.0638,
+    ],
+    dtype=np.float32,
+)
+
 
 class LandCoverNetDataset(Dataset):
     """
@@ -46,24 +69,19 @@ class LandCoverNetDataset(Dataset):
         └── ...
 
     Image:
-        GeoTIFF with shape [C, H, W]
-        C can be 4 for the original dataset or 10 for the multiband dataset
+        GeoTIFF with shape [C, H, W].
 
     Mask:
-        GeoTIFF with shape [H, W]
-        original labels:
-            0 = ignore / no data
-            1..7 = valid land cover classes
-
-        training labels:
-            255 = ignore_index
-            0..6 = valid classes
+        GeoTIFF with shape [H, W].
+        original labels: 0 = ignore / no data, 1..7 = valid land cover classes
+        training labels: 255 = ignore_index, 0..6 = valid classes
     """
 
     def __init__(
         self,
         root_dir: str | Path,
         normalize: bool = True,
+        normalization_mode: str = "reflectance",
         reflectance_scale: float = 10000.0,
         clip_max: float = 1.5,
         augment: bool = False,
@@ -75,7 +93,17 @@ class LandCoverNetDataset(Dataset):
         self.images_dir = self.root_dir / "images"
         self.masks_dir = self.root_dir / "masks"
 
+        if normalization_mode not in NORMALIZATION_MODES:
+            raise ValueError(
+                f"Unsupported normalization_mode={normalization_mode}. "
+                f"Supported values: {NORMALIZATION_MODES}"
+            )
+
+        if not normalize:
+            normalization_mode = "none"
+
         self.normalize = normalize
+        self.normalization_mode = normalization_mode
         self.reflectance_scale = reflectance_scale
         self.clip_max = clip_max
         self.augment = augment
@@ -173,16 +201,28 @@ class LandCoverNetDataset(Dataset):
         return remapped
 
     def _normalize_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Simple reflectance-like normalization.
+        """Normalize image according to the selected mode."""
+        if self.normalization_mode == "none":
+            return image.astype(np.float32)
 
-        Sentinel-2 values are often stored roughly around 0..10000,
-        but in the processed dataset max values may be higher.
-        """
-        image = image / self.reflectance_scale
-        image = np.clip(image, 0.0, self.clip_max)
+        if self.normalization_mode == "reflectance":
+            image = image / self.reflectance_scale
+            image = np.clip(image, 0.0, self.clip_max)
+            return image.astype(np.float32)
 
-        return image.astype(np.float32)
+        if self.normalization_mode == "torchgeo_s2":
+            if image.shape[0] != 13:
+                raise ValueError(
+                    "normalization_mode='torchgeo_s2' expects 13 Sentinel-2 channels "
+                    f"in TorchGeo order, got image shape {image.shape}."
+                )
+
+            mean = TORCHGEO_S2_MEAN[:, None, None]
+            std = TORCHGEO_S2_STD[:, None, None]
+            image = (image - mean) / std
+            return image.astype(np.float32)
+
+        raise ValueError(f"Unsupported normalization_mode: {self.normalization_mode}")
 
     def _augment(
         self,
@@ -227,7 +267,7 @@ class LandCoverNetDataset(Dataset):
             shift = random.uniform(-0.03, 0.03)
             image = image + shift
 
-        image = np.clip(image, 0.0, self.clip_max)
+            image = np.clip(image, 0.0, self.clip_max)
 
         # Important: np.flip / np.rot90 may create arrays with negative strides
         # torch.from_numpy does not support negative strides
@@ -268,6 +308,7 @@ def create_train_val_test_datasets(
     test_ratio: float = 0.15,
     seed: int = 42,
     normalize: bool = True,
+    normalization_mode: str = "reflectance",
     augment_train: bool = True,
     random_crop_size: int | None = None,
     ignore_index: int = 255,
@@ -289,6 +330,7 @@ def create_train_val_test_datasets(
     base_dataset = LandCoverNetDataset(
         root_dir=root_dir,
         normalize=normalize,
+        normalization_mode=normalization_mode,
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
@@ -313,6 +355,7 @@ def create_train_val_test_datasets(
     train_dataset = LandCoverNetDataset(
         root_dir=root_dir,
         normalize=normalize,
+        normalization_mode=normalization_mode,
         augment=augment_train,
         random_crop_size=random_crop_size,
         ignore_index=ignore_index,
@@ -322,6 +365,7 @@ def create_train_val_test_datasets(
     val_dataset = LandCoverNetDataset(
         root_dir=root_dir,
         normalize=normalize,
+        normalization_mode=normalization_mode,
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
@@ -331,6 +375,7 @@ def create_train_val_test_datasets(
     test_dataset = LandCoverNetDataset(
         root_dir=root_dir,
         normalize=normalize,
+        normalization_mode=normalization_mode,
         augment=False,
         random_crop_size=None,
         ignore_index=ignore_index,
