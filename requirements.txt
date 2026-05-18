@@ -4,3 +4,4 @@ rasterio
 matplotlib
 tqdm
 segmentation-models-pytorch
+torchgeo
