@@ -148,9 +148,9 @@ class ResidualUNet(nn.Module):
         in_channels: int = 4,
         num_classes: int = 7,
         features: tuple[int, int, int, int] = (32, 64, 128, 256),
-        dropout_encoder: tuple[float, float, float, float] = (0.0, 0.0, 0.05, 0.1),
-        dropout_bottleneck: float = 0.2,
-        dropout_decoder: tuple[float, float, float, float] = (0.1, 0.1, 0.05, 0.0),
+        dropout_encoder: tuple[float, float, float, float] = (0.0, 0.05, 0.1, 0.2),
+        dropout_bottleneck: float = 0.3,
+        dropout_decoder: tuple[float, float, float, float] = (0.2, 0.1, 0.05, 0.0),
     ) -> None:
         super().__init__()
 
