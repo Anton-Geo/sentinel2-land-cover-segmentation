@@ -55,6 +55,38 @@ def create_model(
             classes=num_classes,
         )
 
+    if model_name == "unetplusplus":
+        try:
+            import segmentation_models_pytorch as smp
+        except ImportError as exc:
+            raise ImportError(
+                "segmentation_models_pytorch is not installed. "
+                "Install it with: pip install segmentation-models-pytorch"
+            ) from exc
+
+        return smp.UnetPlusPlus(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=in_channels,
+            classes=num_classes,
+        )
+
+    if model_name == "fpn":
+        try:
+            import segmentation_models_pytorch as smp
+        except ImportError as exc:
+            raise ImportError(
+                "segmentation_models_pytorch is not installed. "
+                "Install it with: pip install segmentation-models-pytorch"
+            ) from exc
+
+        return smp.FPN(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=in_channels,
+            classes=num_classes,
+        )
+
     raise ValueError(
         f"Unknown model_name: {model_name}. "
         "Supported models: resunet, deeplabv3plus"

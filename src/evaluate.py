@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="resunet",
-        choices=["resunet", "deeplabv3plus"],
+        choices=["resunet", "deeplabv3plus", "unetplusplus", "fpn"],
         help="Segmentation model architecture.",
     )
 
