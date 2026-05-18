@@ -21,7 +21,8 @@ env/
 
 # Data
 data/*
-!data/figures/*
+!data/figures/
+!data/figures/**
 !data/.gitkeep
 
 # Models
