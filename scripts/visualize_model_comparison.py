@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
 import torch
+import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
 from torch.utils.data import random_split
 
@@ -35,6 +36,17 @@ CLASS_COLORS = np.array(
 ) / 255.0
 
 MASK_CMAP = ListedColormap(CLASS_COLORS)
+
+# Best ensemble strategy from test-set experiments: weighted soft probability averaging.
+# Weights are model-level test mIoU values.
+ENSEMBLE_WEIGHTS = {
+    "ResUNet 13b\nexp22": 0.5429,
+    "DeepLabV3+ R50\nexp21": 0.5237,
+    "Unet++ EffB3\nexp19": 0.5365,
+    "FPN EffB3\nexp20": 0.5104,
+    "TorchGeo DINO α\nexp27": 0.5583,
+}
+
 
 
 def percentile_stretch(rgb: np.ndarray, lower: float = 2, upper: float = 98) -> np.ndarray:
@@ -130,14 +142,70 @@ def load_checkpoint_model(
 
 
 @torch.no_grad()
-def predict(model, image_raw: np.ndarray, device: torch.device) -> np.ndarray:
+def predict_logits(
+    model,
+    image_raw: np.ndarray,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Run one model and return logits on CPU.
+
+    Input image is expected in raw reflectance-like digital numbers.
+    This visualization script uses the same reflectance normalization as the
+    evaluated models: divide by 10000 and clip to [0, 1.5].
+    """
     image = normalize_reflectance(image_raw)
     tensor = torch.from_numpy(image).float().unsqueeze(0).to(device)
 
     logits = model(tensor)
-    pred = torch.argmax(logits, dim=1).squeeze(0)
 
-    return pred.detach().cpu().numpy().astype(np.int64)
+    if isinstance(logits, dict):
+        logits = logits["out"]
+    elif isinstance(logits, tuple):
+        logits = logits[0]
+
+    return logits.detach().cpu()
+
+
+def logits_to_prediction(logits: torch.Tensor) -> np.ndarray:
+    pred = torch.argmax(logits, dim=1).squeeze(0)
+    return pred.numpy().astype(np.int64)
+
+
+def soft_average_ensemble_prediction(
+    logits_by_model: dict[str, torch.Tensor],
+    weights: dict[str, float],
+) -> np.ndarray:
+    """
+    Best tested ensemble strategy: weighted soft probability averaging.
+
+    For each model:
+        probs_m = softmax(logits_m)
+
+    Final prediction:
+        argmax(sum_m weight_m * probs_m / sum_m weight_m)
+    """
+    avg_probs = None
+    total_weight = 0.0
+
+    for model_name, logits in logits_by_model.items():
+        weight = float(weights[model_name])
+        probs = F.softmax(logits, dim=1)
+
+        if avg_probs is None:
+            avg_probs = probs * weight
+        else:
+            avg_probs = avg_probs + probs * weight
+
+        total_weight += weight
+
+    if avg_probs is None or total_weight <= 0:
+        raise ValueError("No logits were provided for ensemble prediction.")
+
+    avg_probs = avg_probs / total_weight
+    pred = torch.argmax(avg_probs, dim=1).squeeze(0)
+
+    return pred.numpy().astype(np.int64)
 
 
 def get_test_chip_ids(data_root_13: Path, seed: int, num_samples: int) -> list[str]:
@@ -246,10 +314,13 @@ def main() -> None:
         ),
     }
 
+    ensemble_title = "Best ensemble\nsoft avg"
+
     column_titles = [
         "RGB",
         "Ground truth",
         *models.keys(),
+        ensemble_title,
     ]
 
     n_rows = len(chip_ids)
@@ -278,17 +349,47 @@ def main() -> None:
 
         axes[row_idx, 1].imshow(mask, cmap=MASK_CMAP, vmin=0, vmax=6, interpolation="nearest")
 
-        predictions = {
-            "ResUNet 13b\nexp22": predict(models["ResUNet 13b\nexp22"], image13_raw, device),
-            "DeepLabV3+ R50\nexp21": predict(models["DeepLabV3+ R50\nexp21"], image10_raw, device),
-            "Unet++ EffB3\nexp19": predict(models["Unet++ EffB3\nexp19"], image10_raw, device),
-            "FPN EffB3\nexp20": predict(models["FPN EffB3\nexp20"], image10_raw, device),
-            "TorchGeo DINO α\nexp27": predict(models["TorchGeo DINO α\nexp27"], image13_raw, device),
+        logits_by_model = {
+            "ResUNet 13b\nexp22": predict_logits(
+                models["ResUNet 13b\nexp22"],
+                image13_raw,
+                device,
+            ),
+            "DeepLabV3+ R50\nexp21": predict_logits(
+                models["DeepLabV3+ R50\nexp21"],
+                image10_raw,
+                device,
+            ),
+            "Unet++ EffB3\nexp19": predict_logits(
+                models["Unet++ EffB3\nexp19"],
+                image10_raw,
+                device,
+            ),
+            "FPN EffB3\nexp20": predict_logits(
+                models["FPN EffB3\nexp20"],
+                image10_raw,
+                device,
+            ),
+            "TorchGeo DINO α\nexp27": predict_logits(
+                models["TorchGeo DINO α\nexp27"],
+                image13_raw,
+                device,
+            ),
         }
 
-        for col_offset, model_name in enumerate(models.keys(), start=2):
+        predictions = {
+            model_name: logits_to_prediction(logits)
+            for model_name, logits in logits_by_model.items()
+        }
+
+        predictions[ensemble_title] = soft_average_ensemble_prediction(
+            logits_by_model=logits_by_model,
+            weights=ENSEMBLE_WEIGHTS,
+        )
+
+        for col_offset, title in enumerate([*models.keys(), ensemble_title], start=2):
             axes[row_idx, col_offset].imshow(
-                predictions[model_name],
+                predictions[title],
                 cmap=MASK_CMAP,
                 vmin=0,
                 vmax=6,
