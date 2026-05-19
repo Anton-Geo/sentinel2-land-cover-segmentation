@@ -1,15 +1,23 @@
 # Sentinel-2 Land Cover Segmentation with Residual U-Net, Pretrained Models, and Ensemble Prediction
 
-This repository contains a deep learning mini-research project for **semantic segmentation of land cover classes** from Sentinel-2 imagery. The current stage of the project includes:
+This repository contains a deep learning mini-research project on **semantic segmentation of land-cover classes from Sentinel-2 imagery**. The project combines model development, experimental comparison, ensemble prediction, and an applied case study focused on the spatial development of Vilnius.
 
-1. preprocessing LandCoverNet Europe 2018 data into summer median Sentinel-2 composites;
-2. training a custom Residual U-Net baseline;
-3. comparing it with ImageNet-pretrained segmentation models and TorchGeo Sentinel-2 pretrained models;
-4. evaluating all models using pixel-level segmentation metrics;
-5. building and evaluating an ensemble based on soft probability averaging;
-6. visualizing predictions from individual models and the best ensemble.
+The main research objective is to estimate **how the land cover of Vilnius changes over time** by applying deep learning segmentation models to Sentinel-2 summer median composites from different years. In particular, the project investigates whether urban expansion can be detected from satellite imagery and which land-cover classes are most affected by this change.
 
-The main selection metric is **mean Intersection over Union (mIoU)**.
+To support this objective, the work follows two connected directions. First, several segmentation models are trained and evaluated on the processed LandCoverNet Europe 2018 dataset. This includes a fully custom Residual U-Net, ImageNet-pretrained segmentation architectures, and a remote-sensing-specific TorchGeo Sentinel-2 pretrained model. Second, the best-performing models are combined into an ensemble and applied to real Sentinel-2 imagery over Vilnius for 2015, 2020, and 2025.
+
+The main model selection metric is **mean Intersection over Union (mIoU)**, while additional metrics such as pixel accuracy, Dice score, and per-class IoU are used for detailed analysis.
+
+The project includes the following main tasks:
+
+1. Prepare LandCoverNet Europe 2018 data as summer median Sentinel-2 composites.
+2. Develop and train a fully custom Residual U-Net segmentation model.
+3. Fine-tune general-purpose pretrained segmentation models on the processed dataset.
+4. Fine-tune a remote-sensing-specific model using TorchGeo Sentinel-2 pretrained weights.
+5. Compare individual models using validation and test segmentation metrics.
+6. Build and evaluate an ensemble prediction strategy based on soft probability averaging.
+7. Apply the selected ensemble to Sentinel-2 imagery over Vilnius for multiple years.
+8. Estimate land-cover class shares and analyze urban development trends over time.
 
 ---
 
@@ -408,9 +416,9 @@ Qualitatively, the ensemble tends to produce smoother and more stable prediction
 
 ---
 
-## Current conclusion
+## Final Ensemble Configuration
 
-At the current stage, the best result is obtained not by a single model, but by a heterogeneous ensemble that combines:
+The best result is obtained not by a single model, but by a heterogeneous ensemble that combines:
 
 - a custom Residual U-Net trained on 13-band data;
 - a TorchGeo Sentinel-2 DINO pretrained model;
@@ -424,6 +432,62 @@ Mean IoU       = 0.5816
 Mean Dice      = 0.7064
 ```
 
-This is the strongest result of the project so far.
+---
+
+## Application to real Sentinel-2 data: Vilnius land-cover dynamics
+
+After model selection, the best ensemble was applied to real Sentinel-2 L2A imagery for the Vilnius municipality. For each target year, a summer median Sentinel-2 composite was generated, tiled into 256 × 256 chips, processed by the ensemble, and mosaicked back into a georeferenced land-cover map.
+
+The real-data inference pipeline uses:
+
+- Sentinel-2 L2A imagery accessed through Microsoft Planetary Computer;
+- 13-band Sentinel-2 composites at 10 m resolution;
+- BOA offset correction for post-2022 Sentinel-2 products;
+- the best five-model ensemble with soft probability averaging;
+- city-boundary clipping for final visualization and area statistics.
+
+The analyzed years were 2015, 2020, and 2025. The table below reports the predicted share of the main land-cover classes inside the Vilnius boundary. Values are percentages of classified pixels within the city boundary.
+
+| Year | Natural Grassland | Cultivated Vegetation | Woody Vegetation / Forest | Artificial Bare Ground | Water |
+|------|-------------------|-----------------------|---------------------------|------------------------|-------|
+| 2015 | 6.4%              | 18.8%                 | 43.8%                     | 29.6%                  | 1.4%  |
+| 2020 | 7.1%              | 15.5%                 | 43.8%                     | 32.2%                  | 1.3%  |
+| 2025 | 8.1%              | 12.2%                 | 43.8%                     | 34.5%                  | 1.4%  |
+
+### Change summary
+
+| Change                    | 2015 -> 2020 | 2020 -> 2025 | 2015 -> 2025 |
+|---------------------------|--------------|--------------|--------------|
+| Natural Grassland         | +0.7 pp      | +1.0 pp      | +1.7 pp      |
+| Cultivated Vegetation     | -3.3 pp      | -3.3 pp      | -6.6 pp      |
+| Woody Vegetation / Forest | 0.0 pp       | 0.0 pp       | 0.0 pp       |
+| Artificial Bare Ground    | +2.6 pp      | +2.3 pp      | +4.9 pp      |
+| Water                     | -0.1 pp      | +0.1 pp      | 0.0 pp       |
+
+The results suggest a steady expansion of urbanized surfaces in Vilnius. The predicted artificial class increased from **29.6%** in 2015 to **34.5%** in 2025, which corresponds to approximately **+4.9 percentage points over ten years**, or roughly **0.5 percentage points per year**. The main decrease is observed in cultivated vegetation, which dropped from **18.8%** to **12.2%**. In contrast, predicted forest cover remained stable at **43.8%** across the analyzed years.
+
+This indicates that urban expansion in the analyzed period was predicted mostly at the expense of cultivated or open agricultural areas rather than forested areas. In qualitative map inspection, major green and park-like zones remain largely preserved, while artificial surfaces expand around already urbanized or peri-urban parts of the municipality.
+
+These values should be interpreted as **model-derived estimates**, not as official land-cover statistics. The analysis is still useful for showing the practical transfer of the trained ensemble from benchmark evaluation to multi-year remote-sensing inference over a real urban AOI.
+
+### Vilnius visualizations
+
+The final maps are stored in `data/figures/`. The poster-style figures use a dark background, the Vilnius municipal boundary, DEM-based hillshade, and class-share bars.
+
+#### Sentinel-2 RGB reference, 2025
+
+![Vilnius Sentinel-2 RGB poster, 2025](data/figures/vilnius_2025_rgb_poster.png)
+
+#### Predicted land cover, 2015
+
+![Vilnius predicted land cover, 2015](data/figures/vilnius_2015_prediction_poster.png)
+
+#### Predicted land cover, 2020
+
+![Vilnius predicted land cover, 2020](data/figures/vilnius_2020_prediction_poster.png)
+
+#### Predicted land cover, 2025
+
+![Vilnius predicted land cover, 2025](data/figures/vilnius_2025_prediction_poster.png)
 
 ---
