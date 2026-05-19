@@ -227,6 +227,7 @@ def predict_soft_average(
     images_13: torch.Tensor,
     selected_model_keys: list[str],
     device: torch.device,
+    exclude_classes: list[int] | None = None,
 ) -> torch.Tensor:
     images_10 = images_10.to(device, non_blocking=True)
     images_13 = images_13.to(device, non_blocking=True)
@@ -254,6 +255,21 @@ def predict_soft_average(
         raise RuntimeError("No ensemble probabilities were computed.")
 
     avg_probs = avg_probs / total_weight
+
+    if exclude_classes:
+        for class_id in exclude_classes:
+            if not 0 <= class_id < NUM_CLASSES:
+                raise ValueError(
+                    f"Invalid excluded class id: {class_id}. "
+                    f"Valid class ids are 0..{NUM_CLASSES - 1}."
+                )
+
+        # Suppress impossible/unwanted classes before argmax:
+        # for summer Lithuania inference, class 3 = Permanent Snow and Ice
+        # can be removed this way. Pixels then fall back to the next most
+        # probable class, not to a manually fixed replacement.
+        avg_probs[:, exclude_classes, :, :] = 0.0
+
     preds = avg_probs.argmax(dim=1).to(torch.uint8)  # [B,H,W]
     return preds.detach().cpu()
 
@@ -376,6 +392,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--reflectance-scale", type=float, default=10000.0)
     parser.add_argument("--clip-max", type=float, default=1.5)
+    parser.add_argument(
+        "--exclude-classes",
+        nargs="*",
+        type=int,
+        default=[],
+        help=(
+            "Class IDs to suppress before argmax. "
+            "For summer Sentinel-2 inference in Lithuania, use "
+            "'--exclude-classes 3' to remove snow/ice."
+        ),
+    )
 
     parser.add_argument(
         "--skip-existing",
@@ -413,6 +440,7 @@ def main() -> None:
     print(f"13-band chips root: {args.chips_root_13}")
     print(f"Output dir: {output_dir}")
     print(f"Prediction chips dir: {predictions_dir}")
+    print(f"Excluded classes before argmax: {args.exclude_classes}")
 
     dataset = PairedRealChipsDataset(
         root_10=args.chips_root_10,
@@ -442,10 +470,11 @@ def main() -> None:
         print(f"Loading {key}: {checkpoint_path}")
         models[key] = load_model(config, checkpoint_path, device)
 
+    # Used for georeferencing output predictions.
     images_13_dir = Path(args.chips_root_13) / "images"
 
     for images_10, images_13, names in tqdm(loader, desc="Real ensemble inference"):
-
+        # Avoid unnecessary compute if all outputs already exist.
         if args.skip_existing:
             existing_flags = [(predictions_dir / name).exists() for name in names]
             if all(existing_flags):
@@ -457,6 +486,7 @@ def main() -> None:
             images_13=images_13,
             selected_model_keys=list(args.models),
             device=device,
+            exclude_classes=list(args.exclude_classes),
         )
 
         for pred_tensor, name in zip(preds, names):
