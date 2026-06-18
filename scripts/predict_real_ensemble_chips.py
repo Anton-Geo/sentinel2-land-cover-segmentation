@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ from src.model_factory import create_model
 
 NUM_CLASSES = 7
 PRED_NODATA = 255
+UNCERTAINTY_NODATA = -9999.0
+EPS = 1e-8
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,17 @@ class EnsembleModelConfig:
     torchgeo_weights: str | None = "sentinel2_all_dino"
     torchgeo_decoder_dropout: float = 0.1
     model_weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class EnsembleInferenceOutput:
+    """Batch-level outputs from weighted soft-probability ensemble inference."""
+
+    preds: torch.Tensor  # [B,H,W], uint8 class ids
+    predictive_entropy: torch.Tensor | None = None  # [B,H,W], float32, normalized 0..1
+    expected_entropy: torch.Tensor | None = None  # [B,H,W], float32, normalized 0..1
+    mutual_information: torch.Tensor | None = None  # [B,H,W], float32, normalized 0..1
+    confidence: torch.Tensor | None = None  # [B,H,W], float32, max averaged probability
 
 
 # Model-level weights are test mIoU values from the evaluation stage.
@@ -220,6 +234,49 @@ def load_model(config: EnsembleModelConfig, checkpoint_path: Path, device: torch
     return model
 
 
+def _validate_excluded_classes(exclude_classes: list[int] | None) -> list[int]:
+    excluded = sorted(set(exclude_classes or []))
+    for class_id in excluded:
+        if not 0 <= class_id < NUM_CLASSES:
+            raise ValueError(
+                f"Invalid excluded class id: {class_id}. Valid class ids are 0..{NUM_CLASSES - 1}."
+            )
+    if len(excluded) >= NUM_CLASSES:
+        raise ValueError("Cannot exclude all classes.")
+    return excluded
+
+
+def suppress_classes_and_renormalize(probs: torch.Tensor, exclude_classes: list[int] | None) -> torch.Tensor:
+    """
+    Suppress unwanted classes and renormalize probabilities over remaining classes.
+
+    This is useful when, for example, class 3 = Permanent Snow and Ice is treated as
+    impossible for summer Lithuania inference. Entropy is then computed over the
+    remaining valid class space rather than over a distribution whose probabilities
+    no longer sum to 1.
+    """
+    excluded = _validate_excluded_classes(exclude_classes)
+    if not excluded:
+        return probs
+
+    probs = probs.clone()
+    probs[:, excluded, :, :] = 0.0
+    probs_sum = probs.sum(dim=1, keepdim=True).clamp_min(EPS)
+    return probs / probs_sum
+
+
+def normalized_entropy(probs: torch.Tensor, num_active_classes: int) -> torch.Tensor:
+    """
+    Compute normalized categorical entropy for [B,C,H,W] probabilities.
+
+    Returns [B,H,W] in approximately [0,1], where 0 means a near-certain class and
+    1 means probability mass is close to uniformly spread over active classes.
+    """
+    entropy = -(probs.clamp_min(EPS) * probs.clamp_min(EPS).log()).sum(dim=1)
+    norm = math.log(float(num_active_classes))
+    return entropy / max(norm, EPS)
+
+
 @torch.no_grad()
 def predict_soft_average(
     models: dict[str, nn.Module],
@@ -228,11 +285,27 @@ def predict_soft_average(
     selected_model_keys: list[str],
     device: torch.device,
     exclude_classes: list[int] | None = None,
-) -> torch.Tensor:
+    compute_uncertainty: bool = False,
+) -> EnsembleInferenceOutput:
+    """
+    Run weighted soft-probability ensemble inference.
+
+    If compute_uncertainty=True, also compute three normalized uncertainty maps:
+        predictive_entropy = H[weighted-average probabilities]
+        expected_entropy   = weighted average of H[individual model probabilities]
+        mutual_information = predictive_entropy - expected_entropy
+
+    With weighted ensembles, expected entropy is weighted with the same model weights
+    used for soft probability averaging.
+    """
     images_10 = images_10.to(device, non_blocking=True)
     images_13 = images_13.to(device, non_blocking=True)
 
+    excluded = _validate_excluded_classes(exclude_classes)
+    num_active_classes = NUM_CLASSES - len(excluded)
+
     avg_probs: torch.Tensor | None = None
+    expected_entropy_sum: torch.Tensor | None = None
     total_weight = 0.0
 
     for key in selected_model_keys:
@@ -242,6 +315,7 @@ def predict_soft_average(
 
         logits = model(images)
         probs = F.softmax(logits, dim=1)
+        probs = suppress_classes_and_renormalize(probs, excluded)
         weight = float(config.model_weight)
 
         if avg_probs is None:
@@ -249,40 +323,47 @@ def predict_soft_average(
         else:
             avg_probs += probs * weight
 
+        if compute_uncertainty:
+            model_entropy = normalized_entropy(probs, num_active_classes)
+            if expected_entropy_sum is None:
+                expected_entropy_sum = model_entropy * weight
+            else:
+                expected_entropy_sum += model_entropy * weight
+
         total_weight += weight
 
     if avg_probs is None or total_weight <= 0:
         raise RuntimeError("No ensemble probabilities were computed.")
 
     avg_probs = avg_probs / total_weight
-
-    if exclude_classes:
-        for class_id in exclude_classes:
-            if not 0 <= class_id < NUM_CLASSES:
-                raise ValueError(
-                    f"Invalid excluded class id: {class_id}. "
-                    f"Valid class ids are 0..{NUM_CLASSES - 1}."
-                )
-
-        # Suppress impossible/unwanted classes before argmax:
-        # for summer Lithuania inference, class 3 = Permanent Snow and Ice
-        # can be removed this way. Pixels then fall back to the next most
-        # probable class, not to a manually fixed replacement.
-        avg_probs[:, exclude_classes, :, :] = 0.0
-
     preds = avg_probs.argmax(dim=1).to(torch.uint8)  # [B,H,W]
-    return preds.detach().cpu()
+
+    if not compute_uncertainty:
+        return EnsembleInferenceOutput(preds=preds.detach().cpu())
+
+    if expected_entropy_sum is None:
+        raise RuntimeError("Expected entropy was not computed.")
+
+    predictive_entropy = normalized_entropy(avg_probs, num_active_classes)
+    expected_entropy = expected_entropy_sum / total_weight
+    mutual_information = (predictive_entropy - expected_entropy).clamp_min(0.0)
+    confidence = avg_probs.max(dim=1).values
+
+    return EnsembleInferenceOutput(
+        preds=preds.detach().cpu(),
+        predictive_entropy=predictive_entropy.detach().cpu().float(),
+        expected_entropy=expected_entropy.detach().cpu().float(),
+        mutual_information=mutual_information.detach().cpu().float(),
+        confidence=confidence.detach().cpu().float(),
+    )
 
 
-def save_prediction_chip(
-    pred: np.ndarray,
+def _single_band_profile(
     reference_path: Path,
-    output_path: Path,
-) -> None:
-    """
-    Save one predicted mask as single-band GeoTIFF using the 13-band chip as reference.
-    Prediction labels are 0..6, nodata is 255.
-    """
+    array: np.ndarray,
+    dtype: str,
+    nodata: int | float,
+) -> dict:
     with rasterio.open(reference_path) as src:
         profile = src.profile.copy()
 
@@ -292,17 +373,25 @@ def save_prediction_chip(
 
     profile.update(
         driver="GTiff",
-        height=pred.shape[0],
-        width=pred.shape[1],
+        height=array.shape[0],
+        width=array.shape[1],
         count=1,
-        dtype="uint8",
-        nodata=PRED_NODATA,
+        dtype=dtype,
+        nodata=nodata,
         compress="deflate",
         tiled=True,
         blockxsize=256,
         blockysize=256,
     )
+    return profile
 
+
+def save_prediction_chip(pred: np.ndarray, reference_path: Path, output_path: Path) -> None:
+    """
+    Save one predicted mask as single-band GeoTIFF using the 13-band chip as reference.
+    Prediction labels are 0..6, nodata is 255.
+    """
+    profile = _single_band_profile(reference_path, pred, dtype="uint8", nodata=PRED_NODATA)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(output_path, "w", **profile) as dst:
@@ -310,17 +399,34 @@ def save_prediction_chip(
         dst.set_band_description(1, "land_cover_prediction")
 
 
-def create_mosaic(predictions_dir: Path, output_path: Path) -> None:
-    """Merge predicted chip GeoTIFFs into one mosaic GeoTIFF."""
+def save_float32_chip(array: np.ndarray, reference_path: Path, output_path: Path, band_description: str) -> None:
+    """Save one float32 uncertainty/confidence map as a single-band GeoTIFF."""
+    array = array.astype(np.float32)
+    profile = _single_band_profile(reference_path, array, dtype="float32", nodata=UNCERTAINTY_NODATA)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(array, 1)
+        dst.set_band_description(1, band_description)
+
+
+def create_single_band_mosaic(
+    input_dir: Path,
+    output_path: Path,
+    band_description: str,
+    dtype: str,
+    nodata: int | float,
+) -> None:
+    """Merge single-band chip GeoTIFFs into one mosaic GeoTIFF."""
     from rasterio.merge import merge
 
-    paths = sorted(predictions_dir.glob("*.tif"))
+    paths = sorted(input_dir.glob("*.tif"))
     if not paths:
-        raise RuntimeError(f"No prediction chips found in {predictions_dir}")
+        raise RuntimeError(f"No chips found in {input_dir}")
 
     srcs = [rasterio.open(path) for path in paths]
     try:
-        mosaic, transform = merge(srcs, method="first", nodata=PRED_NODATA)
+        mosaic, transform = merge(srcs, method="first", nodata=nodata)
         profile = srcs[0].profile.copy()
     finally:
         for src in srcs:
@@ -333,9 +439,9 @@ def create_mosaic(predictions_dir: Path, output_path: Path) -> None:
         height=mosaic.shape[1],
         width=mosaic.shape[2],
         count=1,
-        dtype="uint8",
+        dtype=dtype,
         transform=transform,
-        nodata=PRED_NODATA,
+        nodata=nodata,
         compress="deflate",
         tiled=True,
         blockxsize=256,
@@ -344,15 +450,15 @@ def create_mosaic(predictions_dir: Path, output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(mosaic)
-        dst.set_band_description(1, "land_cover_prediction")
+        dst.write(mosaic.astype(dtype))
+        dst.set_band_description(1, band_description)
 
     print(f"Saved mosaic: {output_path}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run best soft-average ensemble on real Sentinel-2 10-band/13-band chips."
+        description="Run weighted soft-average ensemble on real Sentinel-2 10-band/13-band chips."
     )
 
     parser.add_argument(
@@ -371,7 +477,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=str,
         required=True,
-        help="Output directory for prediction chips and optional mosaic.",
+        help="Output directory for prediction chips, uncertainty chips, and optional mosaics.",
     )
 
     parser.add_argument(
@@ -398,9 +504,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=[],
         help=(
-            "Class IDs to suppress before argmax. "
-            "For summer Sentinel-2 inference in Lithuania, use "
-            "'--exclude-classes 3' to remove snow/ice."
+            "Class IDs to suppress before argmax and uncertainty calculation. "
+            "For summer Sentinel-2 inference in Lithuania, use '--exclude-classes 3' "
+            "to remove snow/ice from the active class space."
+        ),
+    )
+
+    parser.add_argument(
+        "--save-uncertainty",
+        action="store_true",
+        help=(
+            "Save normalized predictive entropy, expected entropy, mutual information, "
+            "and confidence chips in addition to class predictions."
         ),
     )
 
@@ -415,6 +530,11 @@ def parse_args() -> argparse.Namespace:
         help="Merge prediction chips into a single GeoTIFF mosaic after inference.",
     )
     parser.add_argument(
+        "--make-uncertainty-mosaics",
+        action="store_true",
+        help="Merge uncertainty/confidence chips into single GeoTIFF mosaics after inference.",
+    )
+    parser.add_argument(
         "--mosaic-output",
         type=str,
         default=None,
@@ -422,6 +542,18 @@ def parse_args() -> argparse.Namespace:
     )
 
     return parser.parse_args()
+
+
+def required_output_paths(
+    name: str,
+    predictions_dir: Path,
+    uncertainty_dirs: dict[str, Path],
+    save_uncertainty: bool,
+) -> list[Path]:
+    paths = [predictions_dir / name]
+    if save_uncertainty:
+        paths.extend(directory / name for directory in uncertainty_dirs.values())
+    return paths
 
 
 @torch.no_grad()
@@ -432,6 +564,16 @@ def main() -> None:
     predictions_dir = output_dir / "prediction_chips"
     predictions_dir.mkdir(parents=True, exist_ok=True)
 
+    uncertainty_dirs = {
+        "predictive_entropy": output_dir / "predictive_entropy_chips",
+        "expected_entropy": output_dir / "expected_entropy_chips",
+        "mutual_information": output_dir / "mutual_information_chips",
+        "confidence": output_dir / "confidence_chips",
+    }
+    if args.save_uncertainty:
+        for directory in uncertainty_dirs.values():
+            directory.mkdir(parents=True, exist_ok=True)
+
     device = get_device()
 
     print(f"Device: {device}")
@@ -440,7 +582,8 @@ def main() -> None:
     print(f"13-band chips root: {args.chips_root_13}")
     print(f"Output dir: {output_dir}")
     print(f"Prediction chips dir: {predictions_dir}")
-    print(f"Excluded classes before argmax: {args.exclude_classes}")
+    print(f"Save uncertainty: {args.save_uncertainty}")
+    print(f"Excluded classes: {args.exclude_classes}")
 
     dataset = PairedRealChipsDataset(
         root_10=args.chips_root_10,
@@ -464,7 +607,10 @@ def main() -> None:
         config = MODEL_CONFIGS[key]
         checkpoint_value = getattr(args, config.checkpoint_arg)
         if checkpoint_value is None:
-            raise ValueError(f"Checkpoint argument is required for selected model {key}: --{config.checkpoint_arg.replace('_', '-')}")
+            raise ValueError(
+                f"Checkpoint argument is required for selected model {key}: "
+                f"--{config.checkpoint_arg.replace('_', '-')}"
+            )
 
         checkpoint_path = Path(checkpoint_value)
         print(f"Loading {key}: {checkpoint_path}")
@@ -476,29 +622,70 @@ def main() -> None:
     for images_10, images_13, names in tqdm(loader, desc="Real ensemble inference"):
         # Avoid unnecessary compute if all outputs already exist.
         if args.skip_existing:
-            existing_flags = [(predictions_dir / name).exists() for name in names]
+            existing_flags = [
+                all(
+                    path.exists()
+                    for path in required_output_paths(
+                        name, predictions_dir, uncertainty_dirs, args.save_uncertainty
+                    )
+                )
+                for name in names
+            ]
             if all(existing_flags):
                 continue
 
-        preds = predict_soft_average(
+        outputs = predict_soft_average(
             models=models,
             images_10=images_10,
             images_13=images_13,
             selected_model_keys=list(args.models),
             device=device,
             exclude_classes=list(args.exclude_classes),
+            compute_uncertainty=args.save_uncertainty,
         )
 
-        for pred_tensor, name in zip(preds, names):
+        for batch_idx, name in enumerate(names):
             output_path = predictions_dir / name
-            if args.skip_existing and output_path.exists():
-                continue
-
             reference_path = images_13_dir / name
-            pred_np = pred_tensor.numpy().astype(np.uint8)
-            save_prediction_chip(pred_np, reference_path, output_path)
+
+            if not (args.skip_existing and output_path.exists()):
+                pred_np = outputs.preds[batch_idx].numpy().astype(np.uint8)
+                save_prediction_chip(pred_np, reference_path, output_path)
+
+            if args.save_uncertainty:
+                metric_tensors = {
+                    "predictive_entropy": outputs.predictive_entropy,
+                    "expected_entropy": outputs.expected_entropy,
+                    "mutual_information": outputs.mutual_information,
+                    "confidence": outputs.confidence,
+                }
+                band_descriptions = {
+                    "predictive_entropy": "normalized_predictive_entropy_total_uncertainty",
+                    "expected_entropy": "normalized_expected_entropy_aleatoric_proxy",
+                    "mutual_information": "normalized_mutual_information_epistemic_proxy",
+                    "confidence": "max_ensemble_probability_confidence",
+                }
+
+                for metric_name, tensor in metric_tensors.items():
+                    if tensor is None:
+                        raise RuntimeError(f"Missing tensor for metric: {metric_name}")
+
+                    metric_output_path = uncertainty_dirs[metric_name] / name
+                    if args.skip_existing and metric_output_path.exists():
+                        continue
+
+                    metric_np = tensor[batch_idx].numpy().astype(np.float32)
+                    save_float32_chip(
+                        metric_np,
+                        reference_path,
+                        metric_output_path,
+                        band_description=band_descriptions[metric_name],
+                    )
 
     print(f"Saved prediction chips: {len(list(predictions_dir.glob('*.tif')))}")
+    if args.save_uncertainty:
+        for metric_name, directory in uncertainty_dirs.items():
+            print(f"Saved {metric_name} chips: {len(list(directory.glob('*.tif')))}")
 
     if args.make_mosaic:
         if args.mosaic_output is not None:
@@ -506,7 +693,43 @@ def main() -> None:
         else:
             mosaic_output = output_dir / "landcover_ensemble_softavg_mosaic.tif"
 
-        create_mosaic(predictions_dir, mosaic_output)
+        create_single_band_mosaic(
+            predictions_dir,
+            mosaic_output,
+            band_description="land_cover_prediction",
+            dtype="uint8",
+            nodata=PRED_NODATA,
+        )
+
+    if args.save_uncertainty and args.make_uncertainty_mosaics:
+        create_single_band_mosaic(
+            uncertainty_dirs["predictive_entropy"],
+            output_dir / "predictive_entropy_mosaic.tif",
+            band_description="normalized_predictive_entropy_total_uncertainty",
+            dtype="float32",
+            nodata=UNCERTAINTY_NODATA,
+        )
+        create_single_band_mosaic(
+            uncertainty_dirs["expected_entropy"],
+            output_dir / "expected_entropy_mosaic.tif",
+            band_description="normalized_expected_entropy_aleatoric_proxy",
+            dtype="float32",
+            nodata=UNCERTAINTY_NODATA,
+        )
+        create_single_band_mosaic(
+            uncertainty_dirs["mutual_information"],
+            output_dir / "mutual_information_mosaic.tif",
+            band_description="normalized_mutual_information_epistemic_proxy",
+            dtype="float32",
+            nodata=UNCERTAINTY_NODATA,
+        )
+        create_single_band_mosaic(
+            uncertainty_dirs["confidence"],
+            output_dir / "confidence_mosaic.tif",
+            band_description="max_ensemble_probability_confidence",
+            dtype="float32",
+            nodata=UNCERTAINTY_NODATA,
+        )
 
 
 if __name__ == "__main__":
