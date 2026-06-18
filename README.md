@@ -23,7 +23,7 @@ The project includes the following main tasks:
 
 ## Dataset
 
-The source dataset is **LandCoverNet Europe 2018**, part of the LandCoverNet global land-cover classification training dataset.
+The source dataset is **LandCoverNet Europe 2018**, part of the LandCoverNet global land-cover classification training dataset [[1]](#ref1).
 
 - Dataset DOI: <https://doi.org/10.34911/rdnt.63fxe5>
 - Source page: <https://source.coop/radiantearth/landcovernet/landcovernet_eu>
@@ -132,10 +132,7 @@ data/
 
 ### Custom Residual U-Net
 
-The main custom architecture is a Residual U-Net inspired by the original U-Net encoder-decoder structure with skip connections:
-
-- U-Net reference: <https://arxiv.org/abs/1505.04597>
-
+The main custom architecture is a Residual U-Net inspired by the original U-Net encoder-decoder structure with skip connections [[2]](#ref2) and residual learning [[3]](#ref3).
 The implemented model uses:
 
 - encoder blocks with `ResidualDoubleConv`;
@@ -162,21 +159,15 @@ Several pretrained segmentation models were tested via `segmentation_models_pyto
 
 Models used:
 
-| Model      | Encoder             | Pretraining |
-|------------|---------------------|-------------|
-| DeepLabV3+ | ResNet34 / ResNet50 | ImageNet    |
-| U-Net++    | EfficientNet-B3     | ImageNet    |
-| FPN        | EfficientNet-B3     | ImageNet    |
-
-References:
-
-- DeepLabV3+: <https://arxiv.org/abs/1802.02611>
-- U-Net++: <https://arxiv.org/abs/1807.10165>
-- Feature Pyramid Networks: <https://arxiv.org/abs/1612.03144>
+| Model      | Encoder             | Pretraining | References                 |
+|------------|---------------------|-------------|----------------------------|
+| DeepLabV3+ | ResNet34 / ResNet50 | ImageNet    | [[4]](#ref4), [[3]](#ref3) |
+| U-Net++    | EfficientNet-B3     | ImageNet    | [[5]](#ref5), [[6]](#ref6) |
+| FPN        | EfficientNet-B3     | ImageNet    | [[7]](#ref7), [[6]](#ref6) |
 
 ### TorchGeo Sentinel-2 pretrained model
 
-A TorchGeo pretrained ResNet50 encoder was also tested:
+A TorchGeo pretrained ResNet50 encoder was also tested [[8]](#ref8), using a ResNet50 backbone [[3]](#ref3):
 
 - TorchGeo repository: <https://github.com/torchgeo/torchgeo>
 - TorchGeo model documentation: <https://torchgeo.readthedocs.io/en/v0.7.0/api/models.html>
@@ -489,5 +480,193 @@ The final maps are stored in `data/figures/`. The poster-style figures use a dar
 #### Predicted land cover, 2025
 
 ![Vilnius predicted land cover, 2025](data/figures/vilnius_2025_prediction_poster.png)
+
+---
+
+## Ensemble uncertainty analysis for Vilnius, 2025
+
+In addition to the final class prediction, the ensemble can also be used to estimate spatial prediction uncertainty. This is possible because the final method is based on **weighted soft probability averaging**, so the model does not only produce hard class labels, but also class probability distributions. This follows the general deep ensemble idea of combining probabilistic predictions from multiple models for predictive uncertainty estimation [[9]](#ref9).
+
+For each pixel ($x$), every ensemble member ($m$) produces a probability distribution over land-cover classes:
+
+$$p_m(y=c \mid x)$$
+
+where ($c$) is a land-cover class and ($m = 1, \dots, M$) is an ensemble model. In this project, the final ensemble contains five models:
+
+$$M = 5$$
+
+The ensemble-averaged probability for class ($c$) is calculated as a weighted average:
+
+$$\bar{p}(y=c \mid x) = \frac{\sum_{m=1}^{M} w_m p_m(y=c \mid x)} {\sum_{m=1}^{M} w_m}$$
+
+where ($w_m$) is the model-level weight based on test-set mIoU.
+
+The final predicted class is then:
+
+$$\hat{y}(x) = \arg\max_c \bar{p}(y=c \mid x)$$
+
+To analyze uncertainty, three information-theoretic metrics were computed. Similar entropy-based uncertainty measures are commonly used in Bayesian deep learning and ensemble uncertainty estimation [[10]](#ref10), [[11]](#ref11), [[12]](#ref12). Here, the five ensemble models are used as a practical way to approximate uncertainty over model predictions.
+
+### Predictive entropy: total uncertainty
+
+Predictive entropy is calculated from the final ensemble-averaged probability distribution:
+
+$$H[\bar{p}(y \mid x)] = -\sum_{c=1}^{C} \bar{p}(y=c \mid x) \log \bar{p}(y=c \mid x)$$
+
+This is the standard entropy of a categorical predictive distribution and is commonly used as a direct measure of predictive uncertainty in classification [[10]](#ref10), [[11]](#ref11).
+
+The value is normalized by the maximum possible entropy:
+
+$$H_{\text{pred,norm}} = \frac{H[\bar{p}(y \mid x)]}{\log C}$$
+
+This gives values approximately in the range from 0 to 1.
+
+Predictive entropy can be interpreted as **total predictive uncertainty**. It is high when the final ensemble probability is distributed across several competing classes, and low when one class clearly dominates.
+
+In the Vilnius map, low predictive entropy is visible over large homogeneous areas such as dense urban districts, water bodies, and major forested zones. These objects have more stable spectral and spatial patterns, so the ensemble predicts them more confidently.
+
+Higher predictive entropy appears mostly in transitional and fragmented areas: suburban zones, edges of built-up areas, cultivated vegetation, natural grassland, river banks, and areas along major roads. This is expected because these locations often contain mixed pixels or gradual transitions between land-cover types.
+
+### Expected entropy: data / aleatoric-like uncertainty
+
+Expected entropy is calculated by computing entropy for each model separately and then averaging these entropy values using the ensemble weights:
+
+$$\mathbb{E}[H[p_m(y \mid x)]] = \frac{\sum_{m=1}^{M} w_m H[p_m(y \mid x)]} {\sum_{m=1}^{M} w_m}$$
+
+where
+
+$$H[p_m(y \mid x)] = -\sum_{c=1}^{C} p_m(y=c \mid x) \log p_m(y=c \mid x)$$
+
+The normalized version is:
+
+$$H_{\text{exp,norm}} = \frac{\mathbb{E}[H[p_m(y \mid x)]]}{\log C}$$
+
+Expected entropy shows how uncertain the individual models are on average. In this project, it is used as a practical proxy for **aleatoric-like uncertainty**, meaning uncertainty that comes from the data itself.
+
+This interpretation follows the common uncertainty-decomposition view where expected conditional entropy captures the part of uncertainty associated with data ambiguity or aleatoric uncertainty [[11]](#ref11), [[12]](#ref12), [[13]](#ref13).
+
+This kind of uncertainty is especially important in Sentinel-2 land-cover segmentation. Many areas are not clean semantic objects with sharp boundaries. A single pixel can include trees, grass, roofs, roads, gardens, shadows, or river-bank vegetation. This is especially visible in private housing areas with dense vegetation, where small objects are mixed inside the same spatial unit.
+
+In the Vilnius uncertainty maps, expected entropy is high in many of the same places where predictive entropy is high. This suggests that a large part of the uncertainty is caused by the physical and semantic ambiguity of the scene itself: fragmented land cover, mixed pixels, and transitions between visually or spectrally similar classes.
+
+### Mutual information: model / epistemic-like uncertainty
+
+Mutual information is computed as the difference between predictive entropy and expected entropy:
+
+$$MI(y, m \mid x) = H[\bar{p}(y \mid x)] - \frac{\sum_{m=1}^{M} w_m H[p_m(y \mid x)]}{\sum_{m=1}^{M} w_m}$$
+
+Using normalized entropy values, this becomes:
+
+$$MI_{\text{norm}} = H_{\text{pred,norm}} - H_{\text{exp,norm}}$$
+
+This follows the same information-theoretic structure used in Bayesian active learning and Bayesian deep learning, where mutual information is expressed as the difference between predictive entropy and expected entropy and is used to measure model disagreement [[10]](#ref10), [[11]](#ref11), [[12]](#ref12), [[14]](#ref14).
+
+Mutual information is used as a proxy for **epistemic-like uncertainty**, or model disagreement. It becomes high when individual models are confident but disagree with each other. This interpretation is common in uncertainty quantification, although recent work also discusses limitations of treating conditional entropy and mutual information as a perfect aleatoric/epistemic decomposition [[15]](#ref15).
+
+For example, if one model confidently predicts woody vegetation, another confidently predicts grassland, and a third confidently predicts cultivated vegetation, then the average ensemble distribution becomes uncertain even though each individual model is confident. This indicates model disagreement rather than only ambiguous input data.
+
+In the Vilnius 2025 map, mutual information is relatively low over most of the area. This is an interesting result because it suggests that the ensemble members are generally consistent with each other. The models do not strongly disagree over most of the city. Instead, most uncertainty seems to come from mixed or transitional land-cover areas rather than from severe model disagreement.
+
+The highest mutual information values appear mainly in complex zones where different architectures may interpret the same pixel slightly differently: suburban areas with small buildings and vegetation, edges between forest and grassland, cultivated-to-grassland transitions, and some fragmented peri-urban regions.
+
+### Visual uncertainty map
+
+The figure below shows the final 2025 prediction together with the three uncertainty maps.
+
+![Vilnius ensemble prediction and uncertainty maps, 2025](data/figures/vilnius_2025_prediction_and_uncertainty.png)
+
+The four panels show:
+
+1. final ensemble land-cover prediction;
+2. predictive entropy as total uncertainty;
+3. expected entropy as data / aleatoric-like uncertainty;
+4. mutual information as model / epistemic-like uncertainty.
+
+A chunk grid is included to make the maps easier to compare spatially. This helps to identify specific locations where the ensemble is confident, where the input scene is ambiguous, and where ensemble members disagree.
+
+### The uncertainty analysis
+
+The uncertainty analysis gives a more detailed view of the final predictions than the class map alone.
+
+The urbanized center of Vilnius and large built-up districts in the southern and south-eastern parts of the city are predicted quite confidently. Dense urban areas with apartment blocks, industrial buildings, and large artificial surfaces appear relatively stable in the uncertainty maps.
+
+Water bodies are also predicted with high confidence. The Neris river channel, lakes, and ponds are clearly visible and have low uncertainty. Large forest and forest-park areas are also generally stable and confidently classified by the ensemble.
+
+The most uncertain areas are not randomly distributed. They mostly appear where the land cover is naturally mixed or fragmented. Low-density residential areas are less homogeneous because private houses are often mixed with gardens, trees, grass, small roads, and other small objects. At Sentinel-2 resolution, such areas are difficult to separate into a single clean class.
+
+Cultivated vegetation and natural grassland also show higher uncertainty. This is expected because these classes can be spectrally similar in summer composites, especially when fields, meadows, and unmanaged open land appear in similar phenological stages.
+
+Areas along the river and major roads are among the brighter regions in the entropy maps. This likely happens for two reasons. First, these are linear transition zones where different land-cover types meet. Second, the surrounding areas may include mixed vegetation, wet or shadowed surfaces, shrubs, bare soil, and small artificial objects. As a result, the model sees several plausible classes rather than one obvious answer.
+
+The comparison between expected entropy and mutual information is also useful. Expected entropy is much more visible than mutual information, while the mutual information map is mostly dark. This suggests that most uncertainty comes from the ambiguity of the land-cover signal itself rather than from strong disagreement between ensemble models.
+
+In other words, the ensemble appears to be relatively consistent. The remaining uncertainty is mainly concentrated in areas where the segmentation task is physically difficult: boundaries between classes, mixed pixels, small objects, and fragmented suburban landscapes.
+
+This uncertainty layer is useful because it changes how the final maps should be interpreted. Instead of treating every predicted pixel equally, it becomes possible to distinguish between confident predictions and areas where the model result should be read more carefully.
+
+---
+
+### References
+
+<a id="ref1"></a>[1] Radiant Earth Foundation.  
+**LandCoverNet.** Source Cooperative / Radiant Earth dataset.  
+DOI: [10.34911/rdnt.63fxe5](https://doi.org/10.34911/rdnt.63fxe5) | Source: [LandCoverNet Europe](https://source.coop/radiantearth/landcovernet/landcovernet_eu)
+
+
+<a id="ref2"></a>[2] Ronneberger, O., Fischer, P., & Brox, T. (2015).  
+**U-Net: Convolutional Networks for Biomedical Image Segmentation.** MICCAI 2015.  
+DOI: [10.1007/978-3-319-24574-4_28](https://doi.org/10.1007/978-3-319-24574-4_28) | Preprint: [arXiv:1505.04597](https://arxiv.org/abs/1505.04597)
+
+<a id="ref3"></a>[3] He, K., Zhang, X., Ren, S., & Sun, J. (2016).  
+**Deep Residual Learning for Image Recognition.** CVPR 2016.  
+DOI: [10.1109/CVPR.2016.90](https://doi.org/10.1109/CVPR.2016.90) | Preprint: [arXiv:1512.03385](https://arxiv.org/abs/1512.03385)
+
+<a id="ref4"></a>[4] Chen, L.-C., Zhu, Y., Papandreou, G., Schroff, F., & Adam, H. (2018).  
+**Encoder-Decoder with Atrous Separable Convolution for Semantic Image Segmentation.** ECCV 2018.  
+DOI: [10.1007/978-3-030-01234-2_49](https://doi.org/10.1007/978-3-030-01234-2_49) | Preprint: [arXiv:1802.02611](https://arxiv.org/abs/1802.02611)
+
+<a id="ref5"></a>[5] Zhou, Z., Rahman Siddiquee, M. M., Tajbakhsh, N., & Liang, J. (2018).  
+**UNet++: A Nested U-Net Architecture for Medical Image Segmentation.** DLMIA 2018.  
+DOI: [10.1007/978-3-030-00889-5_1](https://doi.org/10.1007/978-3-030-00889-5_1) | Preprint: [arXiv:1807.10165](https://arxiv.org/abs/1807.10165)
+
+<a id="ref6"></a>[6] Tan, M., & Le, Q. V. (2019).  
+**EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks.** ICML 2019.  
+Proceedings: [PMLR v97](https://proceedings.mlr.press/v97/tan19a.html) | Preprint: [arXiv:1905.11946](https://arxiv.org/abs/1905.11946)
+
+<a id="ref7"></a>[7] Lin, T.-Y., Dollár, P., Girshick, R., He, K., Hariharan, B., & Belongie, S. (2017).  
+**Feature Pyramid Networks for Object Detection.** CVPR 2017.  
+DOI: [10.1109/CVPR.2017.106](https://doi.org/10.1109/CVPR.2017.106) | Preprint: [arXiv:1612.03144](https://arxiv.org/abs/1612.03144)
+
+<a id="ref8"></a>[8] Stewart, A. J., Robinson, C., Corley, I. A., Ortiz, A., Lavista Ferres, J. M., & Banerjee, A. (2022).  
+**TorchGeo: Deep Learning With Geospatial Data.** ACM SIGSPATIAL 2022.  
+DOI: [10.1145/3557915.3560953](https://doi.org/10.1145/3557915.3560953) | Preprint: [arXiv:2111.08872](https://arxiv.org/abs/2111.08872)
+
+<a id="ref9"></a>[9] Lakshminarayanan, B., Pritzel, A., & Blundell, C. (2017).  
+**Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles.** NeurIPS 2017.  
+Proceedings: [NeurIPS 2017](https://papers.nips.cc/paper/2017/hash/9ef2ed4b7fd2c810847ffa5fa85bcece-Abstract.html) | Preprint: [arXiv:1612.01474](https://arxiv.org/abs/1612.01474)
+
+<a id="ref10"></a>[10] Smith, L., & Gal, Y. (2018).  
+**Understanding Measures of Uncertainty for Adversarial Example Detection.** UAI 2018.  
+Proceedings: [UAI 2018](http://auai.org/uai2018/proceedings/papers/332.pdf) | Preprint: [arXiv:1803.08533](https://arxiv.org/abs/1803.08533)
+
+<a id="ref11"></a>[11] Malinin, A., & Gales, M. (2018).  
+**Predictive Uncertainty Estimation via Prior Networks.** NeurIPS 2018.  
+Proceedings: [NeurIPS 2018](https://papers.nips.cc/paper/2018/hash/3a22afbbcc1a61d154a4c64fb664b52b-Abstract.html) | Preprint: [arXiv:1802.10501](https://arxiv.org/abs/1802.10501)
+
+<a id="ref12"></a>[12] Depeweg, S., Hernández-Lobato, J. M., Doshi-Velez, F., & Udluft, S. (2018).  
+**Decomposition of Uncertainty in Bayesian Deep Learning for Efficient and Risk-sensitive Learning.** ICML 2018.  
+Proceedings: [PMLR v80](https://proceedings.mlr.press/v80/depeweg18a.html) | Preprint: [arXiv:1710.11263](https://arxiv.org/abs/1710.11263)
+
+<a id="ref13"></a>[13] Kendall, A., & Gal, Y. (2017).  
+**What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision?** NeurIPS 2017.  
+Proceedings: [NeurIPS 2017](https://papers.nips.cc/paper/2017/hash/2650d6089a6d640c5e85b2b88265dc2b-Abstract.html) | Preprint: [arXiv:1703.04977](https://arxiv.org/abs/1703.04977)
+
+<a id="ref14"></a>[14] Houlsby, N., Huszár, F., Ghahramani, Z., & Lengyel, M. (2011).  
+**Bayesian Active Learning for Classification and Preference Learning.** arXiv.  
+DOI: [10.48550/arXiv.1112.5745](https://doi.org/10.48550/arXiv.1112.5745) | Preprint: [arXiv:1112.5745](https://arxiv.org/abs/1112.5745)
+
+<a id="ref15"></a>[15] Wimmer, L., Sale, Y., Hofman, P., Bischl, B., & Hüllermeier, E. (2023).  
+**Quantifying Aleatoric and Epistemic Uncertainty in Machine Learning: Are Conditional Entropy and Mutual Information Appropriate Measures?** UAI 2023.  
+Proceedings: [PMLR v216](https://proceedings.mlr.press/v216/wimmer23a.html) | Preprint: [arXiv:2307.03055](https://arxiv.org/abs/2307.03055)
 
 ---
