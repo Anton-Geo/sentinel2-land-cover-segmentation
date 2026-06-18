@@ -2,6 +2,47 @@
 
 This repository contains a deep learning mini-research project on **semantic segmentation of land-cover classes from Sentinel-2 imagery**. The project combines model development, experimental comparison, ensemble prediction, and an applied case study focused on the spatial development of Vilnius.
 
+<p align="center">
+  <img src="data/figures/vilnius_2025_prediction_and_uncertainty.png" alt="Vilnius ensemble prediction and uncertainty maps, 2025" width="900">
+</p>
+
+<p align="center">
+  Final ensemble land-cover prediction and uncertainty maps for Vilnius, 2025.
+</p>
+
+---
+
+## Table of contents
+
+- [Objective and tasks](#objective-and-tasks)
+- [Dataset](#dataset)
+- [Processed datasets](#processed-datasets)
+- [Project structure](#project-structure)
+- [Model architectures](#model-architectures)
+  - [Custom Residual U-Net](#custom-residual-u-net)
+  - [ImageNet-pretrained segmentation models](#imagenet-pretrained-segmentation-models)
+  - [TorchGeo Sentinel-2 pretrained model](#torchgeo-sentinel-2-pretrained-model)
+- [Loss function](#loss-function)
+- [Metrics](#metrics)
+- [Experiments](#experiments)
+- [Main findings from individual models](#main-findings-from-individual-models)
+- [Ensemble prediction](#ensemble-prediction)
+- [Prediction visualizations](#prediction-visualizations)
+- [Final ensemble configuration](#final-ensemble-configuration)
+- [Application to real Sentinel-2 data: Vilnius land-cover dynamics](#application-to-real-sentinel-2-data-vilnius-land-cover-dynamics)
+  - [Vilnius visualizations](#vilnius-visualizations)
+- [Ensemble uncertainty analysis for Vilnius, 2025](#ensemble-uncertainty-analysis-for-vilnius-2025)
+  - [Predictive entropy: total uncertainty](#predictive-entropy-total-uncertainty)
+  - [Expected entropy: data / aleatoric-like uncertainty](#expected-entropy-data--aleatoric-like-uncertainty)
+  - [Mutual information: model / epistemic-like uncertainty](#mutual-information-model--epistemic-like-uncertainty)
+  - [Visual uncertainty map](#visual-uncertainty-map)
+  - [The uncertainty analysis](#the-uncertainty-analysis)
+- [References](#references)
+
+---
+
+## Objective and tasks
+
 The main research objective is to estimate **how the land cover of Vilnius changes over time** by applying deep learning segmentation models to Sentinel-2 summer median composites from different years. In particular, the project investigates whether urban expansion can be detected from satellite imagery and which land-cover classes are most affected by this change.
 
 To support this objective, the work follows two connected directions. First, several segmentation models are trained and evaluated on the processed LandCoverNet Europe 2018 dataset. This includes a fully custom Residual U-Net, ImageNet-pretrained segmentation architectures, and a remote-sensing-specific TorchGeo Sentinel-2 pretrained model. Second, the best-performing models are combined into an ensemble and applied to real Sentinel-2 imagery over Vilnius for 2015, 2020, and 2025.
@@ -18,6 +59,7 @@ The project includes the following main tasks:
 6. Build and evaluate an ensemble prediction strategy based on soft probability averaging.
 7. Apply the selected ensemble to Sentinel-2 imagery over Vilnius for multiple years.
 8. Estimate land-cover class shares and analyze urban development trends over time.
+9. Analyze ensemble prediction uncertainty using predictive entropy, expected entropy, and mutual information.
 
 ---
 
@@ -133,6 +175,7 @@ data/
 ### Custom Residual U-Net
 
 The main custom architecture is a Residual U-Net inspired by the original U-Net encoder-decoder structure with skip connections [[2]](#ref2) and residual learning [[3]](#ref3).
+
 The implemented model uses:
 
 - encoder blocks with `ResidualDoubleConv`;
@@ -159,11 +202,11 @@ Several pretrained segmentation models were tested via `segmentation_models_pyto
 
 Models used:
 
-| Model      | Encoder             | Pretraining | References                 |
-|------------|---------------------|-------------|----------------------------|
-| DeepLabV3+ | ResNet34 / ResNet50 | ImageNet    | [[4]](#ref4), [[3]](#ref3) |
-| U-Net++    | EfficientNet-B3     | ImageNet    | [[5]](#ref5), [[6]](#ref6) |
-| FPN        | EfficientNet-B3     | ImageNet    | [[7]](#ref7), [[6]](#ref6) |
+| Model      | Encoder             | Pretraining | Architecture / encoder references |
+|------------|---------------------|-------------|-----------------------------------|
+| DeepLabV3+ | ResNet34 / ResNet50 | ImageNet    | [[4]](#ref4), [[3]](#ref3)        |
+| U-Net++    | EfficientNet-B3     | ImageNet    | [[5]](#ref5), [[6]](#ref6)        |
+| FPN        | EfficientNet-B3     | ImageNet    | [[7]](#ref7), [[6]](#ref6)        |
 
 ### TorchGeo Sentinel-2 pretrained model
 
@@ -407,7 +450,7 @@ Qualitatively, the ensemble tends to produce smoother and more stable prediction
 
 ---
 
-## Final Ensemble Configuration
+## Final ensemble configuration
 
 The best result is obtained not by a single model, but by a heterogeneous ensemble that combines:
 
